@@ -14,15 +14,23 @@ app = typer.Typer(
 @app.command()
 def login() -> None:
     """Interactive first login -- saves tokens to ~/.garminconnect."""
-    typer.echo("[stub] login: not yet implemented")
-    raise typer.Exit(code=1)
+    from garmin_local.auth import get_token_store, login_interactive
+
+    email = typer.prompt("Garmin Connect email")
+    password = typer.prompt("Garmin Connect password", hide_input=True)
+    token_store = get_token_store()
+    login_interactive(email, password, token_store)
 
 
 @app.command()
 def spike() -> None:
     """Explore Garmin endpoints and dump raw responses to data/raw/."""
-    typer.echo("[stub] spike: not yet implemented")
-    raise typer.Exit(code=1)
+    from garmin_local.auth import get_client, get_token_store
+    from garmin_local.spike import run_spike
+
+    token_store = get_token_store()
+    api = get_client(token_store)
+    run_spike(api)
 
 
 @app.command()
