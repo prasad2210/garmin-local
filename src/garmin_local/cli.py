@@ -36,7 +36,9 @@ def spike() -> None:
 @app.command()
 def sync(
     now: bool = typer.Option(False, "--now", help="Force sync regardless of watermark."),
-    backfill_days: int = typer.Option(90, "--backfill-days", help="Days to backfill on first run."),
+    backfill_days: int = typer.Option(
+        90, "--backfill-days", min=1, help="Days to backfill on first run."
+    ),
 ) -> None:
     """Watermark sync: pull new data from Garmin into the local database."""
     import logging

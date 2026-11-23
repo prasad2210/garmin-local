@@ -156,9 +156,11 @@ def run_sync(
     api: Any,
     *,
     force: bool = False,
-    backfill_days: int = DEFAULT_BACKFILL_DAYS,
+    backfill_days: int | None = None,
 ) -> None:
     """Execute a watermark sync. Idempotent — re-running changes nothing."""
+    if backfill_days is None:
+        backfill_days = DEFAULT_BACKFILL_DAYS
     today = date.today()
     watermark = get_watermark(conn)
 
