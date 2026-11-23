@@ -73,8 +73,9 @@ def sync(
 @app.command()
 def serve() -> None:
     """Start the MCP server over stdio."""
-    typer.echo("[stub] serve: not yet implemented")
-    raise typer.Exit(code=1)
+    from garmin_local.mcp_server import serve as _serve
+
+    _serve()
 
 
 if __name__ == "__main__":
