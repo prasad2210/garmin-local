@@ -1,0 +1,31 @@
+# Secrets and credentials
+.env
+*.env
+**/*token*.json
+**/*tokens*.json
+
+# Data (all gitignored per hard rules)
+data/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# uv
+uv.lock
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
