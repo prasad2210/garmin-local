@@ -39,8 +39,33 @@ def sync(
     backfill_days: int = typer.Option(90, "--backfill-days", help="Days to backfill on first run."),
 ) -> None:
     """Watermark sync: pull new data from Garmin into the local database."""
-    typer.echo("[stub] sync: not yet implemented")
-    raise typer.Exit(code=1)
+    import logging
+    import os
+    from pathlib import Path
+
+    from garmin_local.auth import get_client, get_token_store
+    from garmin_local.db import migrate, open_db
+    from garmin_local.sync import run_sync
+
+    log_path = Path(os.environ.get("GARMIN_LOG_PATH", "data/sync.log"))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
+    )
+
+    db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = open_db(db_path)
+    migrate(conn)
+
+    token_store = get_token_store()
+    api = get_client(token_store)
+
+    run_sync(conn, api, force=now, backfill_days=backfill_days)
+    conn.close()
 
 
 @app.command()
