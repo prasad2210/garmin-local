@@ -92,12 +92,14 @@ training_context("plan this week's runs")             → recovery-aware weekly 
 
 - A Garmin watch (tested on Forerunner 965; most modern Garmin devices work)
 - A Garmin Connect account (free)
-- A Mac or Linux computer
+- A Windows, Mac, or Linux computer
 - About 15 minutes
 
 ---
 
-## Step 1 — Install Python
+## Setup — Mac / Linux
+
+### Step 1 — Install Python
 
 You need Python 3.12 or newer.
 
@@ -111,7 +113,7 @@ If it shows `Python 3.12` or higher, skip to Step 2.
 
 ---
 
-## Step 2 — Install uv (the tool that runs everything)
+### Step 2 — Install uv (the tool that runs everything)
 
 Open your Terminal (press `Cmd + Space`, type "Terminal", press Enter) and paste this:
 
@@ -123,7 +125,7 @@ Then close and reopen your Terminal window so it takes effect.
 
 ---
 
-## Step 3 — Download garmin-local
+### Step 3 — Download garmin-local
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/garmin-local.git
@@ -135,7 +137,7 @@ uv sync
 
 ---
 
-## Step 4 — Log in to Garmin Connect
+### Step 4 — Log in to Garmin Connect
 
 ```bash
 uv run garmin-local login
@@ -143,30 +145,26 @@ uv run garmin-local login
 
 It will ask for your Garmin Connect email and password. Type them in (the password won't show as you type — that's normal). If you have two-factor authentication, it will prompt for that too.
 
-Your login is saved to your computer (`~/.garminconnect/`). You only need to do this once. garmin-local never sees your password again after this step.
+Your login is saved to your computer (`~/.garminconnect/`). You only need to do this once.
 
 ---
 
-## Step 5 — Pull your data
+### Step 5 — Pull your data
 
 ```bash
 uv run garmin-local sync
 ```
 
-This downloads the last 90 days of your training, sleep, HRV, and wellness data into a local database on your computer. It takes 2–5 minutes — Garmin asks us to go slowly so we don't hammer their servers.
+This downloads the last 90 days of your training, sleep, HRV, and wellness data. It takes 2–5 minutes.
 
-You'll see progress messages. When it says `Sync complete`, you're done.
-
-**To pull fresh data later** (after a run, or the next morning):
+**To pull fresh data later:**
 ```bash
 uv run garmin-local sync --now
 ```
 
 ---
 
-## Step 6 — Start the MCP server
-
-The MCP server is what lets Claude talk to your data.
+### Step 6 — Start the MCP server
 
 **For Claude Desktop (recommended):**
 ```bash
@@ -179,13 +177,9 @@ GARMIN_DB_PATH=data/garmin.db uv run garmin-local serve streamable-http --port 8
 ```
 Then connect your tool to: `http://127.0.0.1:8080/mcp`
 
-The server also exposes:
-- `http://127.0.0.1:8080/healthz` — is the server running?
-- `http://127.0.0.1:8080/readyz` — can it reach the database?
-
 ---
 
-## Step 7 — Connect to Claude Desktop
+### Step 7 — Connect to Claude Desktop
 
 1. Open Claude Desktop
 2. Go to **Settings → Developer → Edit Config**
@@ -212,16 +206,147 @@ Replace `/path/to/garmin-local` with the actual folder path (e.g. `/Users/john/g
 
 ---
 
+## Setup — Windows
+
+### Step 1 — Install Python
+
+1. Go to [python.org/downloads](https://www.python.org/downloads/) and click the big yellow **Download Python** button
+2. Run the installer
+3. **Important:** tick the box that says **"Add Python to PATH"** before clicking Install
+
+**Check it worked** — open Command Prompt (press `Windows + R`, type `cmd`, press Enter) and run:
+```
+python --version
+```
+You should see `Python 3.12` or higher.
+
+---
+
+### Step 2 — Install uv
+
+In Command Prompt, paste this:
+```
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Close and reopen Command Prompt so it takes effect.
+
+---
+
+### Step 3 — Download garmin-local
+
+**Option A — using git:**
+```
+git clone https://github.com/YOUR_USERNAME/garmin-local.git
+cd garmin-local
+uv sync
+```
+
+**Option B — no git:**
+1. Go to the GitHub page and click **Code → Download ZIP**
+2. Unzip it somewhere easy to find (e.g. `C:\Users\YourName\garmin-local`)
+3. Open Command Prompt and navigate there:
+```
+cd C:\Users\YourName\garmin-local
+uv sync
+```
+
+---
+
+### Step 4 — Log in to Garmin Connect
+
+```
+uv run garmin-local login
+```
+
+Type your Garmin Connect email and password when prompted (the password won't show — that's normal).
+
+Your login is saved to `C:\Users\YourName\.garminconnect\`. You only do this once.
+
+---
+
+### Step 5 — Pull your data
+
+```
+uv run garmin-local sync
+```
+
+Downloads the last 90 days of your training, sleep, HRV, and wellness data. Takes 2–5 minutes.
+
+**To pull fresh data later:**
+```
+uv run garmin-local sync --now
+```
+
+---
+
+### Step 6 — Start the MCP server
+
+**For Claude Desktop (recommended):**
+```
+uv run garmin-local serve
+```
+
+**For tools that connect over HTTP (like Joule):**
+```
+set GARMIN_DB_PATH=data\garmin.db
+uv run garmin-local serve streamable-http --port 8080
+```
+Then connect your tool to: `http://127.0.0.1:8080/mcp`
+
+The server also exposes:
+- `http://127.0.0.1:8080/healthz` — is the server running?
+- `http://127.0.0.1:8080/readyz` — can it reach the database?
+
+---
+
+### Step 7 — Connect to Claude Desktop (Windows)
+
+1. Open Claude Desktop
+2. Go to **Settings → Developer → Edit Config**
+3. Add this to the config file — use **double backslashes** in the path:
+
+```json
+{
+  "mcpServers": {
+    "garmin-local": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:\\Users\\YourName\\garmin-local", "garmin-local", "serve"],
+      "env": {
+        "GARMIN_DB_PATH": "C:\\Users\\YourName\\garmin-local\\data\\garmin.db"
+      }
+    }
+  }
+}
+```
+
+Replace `YourName` with your actual Windows username.
+
+4. Restart Claude Desktop
+5. You should see a small hammer icon — that means the tools are connected
+
+---
+
 ## Keeping your data fresh
 
 Your data only updates when you run `sync`. A few options:
 
 **Manual** — run `uv run garmin-local sync --now` after a workout or in the morning.
 
-**Automatic on Mac** — add this to your crontab (`crontab -e`) to sync every morning at 7am:
+**Automatic on Mac/Linux** — add this to your crontab (`crontab -e`) to sync every morning at 7am:
 ```
 0 7 * * * cd /path/to/garmin-local && uv run garmin-local sync >> data/sync.log 2>&1
 ```
+
+**Automatic on Windows** — use Task Scheduler:
+1. Press `Windows + S`, search for **Task Scheduler**, open it
+2. Click **Create Basic Task**
+3. Name it `garmin-sync`, set trigger to **Daily** at 7:00 AM
+4. Set action to **Start a program**:
+   - Program: `uv`
+   - Arguments: `run garmin-local sync`
+   - Start in: `C:\Users\YourName\garmin-local`
+5. Click Finish
 
 The MCP server also kicks off a background sync automatically on the first request of each session, so it will catch up even if you forgot to run it manually.
 
@@ -237,12 +362,25 @@ Run `uv run garmin-local sync --now` to pull the latest data.
 
 **Server won't start / port already in use**
 Another process is using that port. Try a different one:
+
+Mac/Linux:
 ```bash
 GARMIN_DB_PATH=data/garmin.db uv run garmin-local serve streamable-http --port 9090
+```
+Windows:
+```
+set GARMIN_DB_PATH=data\garmin.db
+uv run garmin-local serve streamable-http --port 9090
 ```
 
 **Data seems old**
 The sync cadence checks whether the last sync was within 7 days. Use `--now` to force it regardless.
+
+**Windows: `uv` is not recognised**
+Close and reopen Command Prompt after installing uv. If it still doesn't work, restart your computer.
+
+**Windows: Python not found**
+Re-run the Python installer and make sure **"Add Python to PATH"** is ticked.
 
 ---
 
@@ -251,7 +389,8 @@ The sync cadence checks whether the last sync was within 7 days. Use `--now` to 
 - The database lives in `data/garmin.db` on your machine
 - No data is sent anywhere except to Garmin's servers (to fetch it)
 - The MCP server only allows read-only access — Claude can query but never modify your data
-- Credentials are stored in `~/.garminconnect/` and never logged or committed
+- Credentials are stored in `~/.garminconnect/` (Mac/Linux) or `C:\Users\YourName\.garminconnect\` (Windows) and never logged or committed
+
 
 
 - A Garmin watch (tested on Forerunner 965; most modern Garmin devices work)
