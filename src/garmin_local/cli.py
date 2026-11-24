@@ -70,12 +70,39 @@ def sync(
     conn.close()
 
 
-@app.command()
-def serve() -> None:
-    """Start the MCP server over stdio."""
-    from garmin_local.mcp_server import serve as _serve
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def serve(ctx: typer.Context) -> None:
+    """Start the MCP server.
 
-    _serve()
+    \b
+    Usage:
+      garmin-local serve                        # stdio
+      garmin-local serve sse                    # SSE at http://127.0.0.1:8000/sse
+      garmin-local serve streamable-http        # Streamable HTTP at http://127.0.0.1:8000/
+      garmin-local serve streamable-http --port 8080
+    """
+    import sys
+
+    import click
+
+    @click.command()
+    @click.argument("transport", default="stdio")
+    @click.option("--host", default="127.0.0.1", help="Host to bind.")
+    @click.option("--port", default=8000, type=int, help="Port to bind.")
+    def _cmd(transport: str, host: str, port: int) -> None:
+        from garmin_local.mcp_server import serve as _serve
+
+        if transport == "sse":
+            print(f"garmin-local MCP server started (SSE) at http://{host}:{port}/sse  Press Ctrl+C to stop.", flush=True)
+        elif transport == "streamable-http":
+            print(f"garmin-local MCP server started (streamable-http) at http://{host}:{port}/mcp  Press Ctrl+C to stop.", flush=True)
+        else:
+            print("garmin-local MCP server started (stdio). Press Ctrl+C to stop.", flush=True)
+            sys.stderr.write("garmin-local MCP server started (stdio). Press Ctrl+C to stop.\n")
+            sys.stderr.flush()
+        _serve(transport=transport, host=host, port=port)
+
+    _cmd(ctx.args, standalone_mode=True)
 
 
 if __name__ == "__main__":

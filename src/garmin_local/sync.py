@@ -12,9 +12,11 @@ from typing import Any
 
 from garmin_local.normalize import (
     normalize_activity,
+    normalize_body_composition,
     normalize_daily_summary,
     normalize_exercise_sets,
     normalize_hrv,
+    normalize_personal_record,
     normalize_sleep,
     normalize_training_readiness,
     normalize_training_status,
@@ -304,6 +306,42 @@ def run_sync(
 
     conn.commit()
     logger.info("Upserted training_status")
+
+    # ------------------------------------------------------------------
+    # Body composition
+    # ------------------------------------------------------------------
+    logger.info("Fetching body composition %s to %s", start_str, today_str)
+    try:
+        body_raw = api.get_body_composition(start_str, today_str)
+        _sleep()
+        if body_raw:
+            _save_raw(conn, "body_composition", f"{start_str}_{today_str}", body_raw)
+            rows = normalize_body_composition(body_raw)
+            for row in rows:
+                _upsert(conn, "body_composition", row)
+            conn.commit()
+            logger.info("Upserted %d body_composition rows", len(rows))
+    except Exception:
+        logger.exception("body_composition fetch failed — skipping")
+
+    # ------------------------------------------------------------------
+    # Personal records (fetched once — not date-ranged)
+    # ------------------------------------------------------------------
+    logger.info("Fetching personal records")
+    try:
+        pr_raw = api.get_personal_record()
+        _sleep()
+        if pr_raw:
+            _save_raw(conn, "personal_records", today_str, pr_raw)
+            entries = pr_raw if isinstance(pr_raw, list) else pr_raw.get("personalRecords", [])
+            for entry in entries:
+                row = normalize_personal_record(entry)
+                if row.get("pr_id"):
+                    _upsert(conn, "personal_records", row)
+            conn.commit()
+            logger.info("Upserted personal records")
+    except Exception:
+        logger.exception("personal_records fetch failed — skipping")
 
     # ------------------------------------------------------------------
     # Watermark

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,11 +29,46 @@ mcp = MCPServer(
 )
 
 _DB_PATH: Path | None = None
+_sync_done = False
+_sync_lock = threading.Lock()
+
+log = logging.getLogger(__name__)
+
+
+def _ensure_synced() -> None:
+    """Kick off a watermark sync once per server lifetime in a background thread."""
+    global _sync_done
+    with _sync_lock:
+        if _sync_done:
+            return
+        _sync_done = True
+
+    def _run() -> None:
+        try:
+            from garmin_local.auth import get_client, get_token_store
+            from garmin_local.db import migrate, open_db
+            from garmin_local.sync import run_sync
+
+            db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = open_db(db_path)
+            migrate(conn)
+            token_store = get_token_store()
+            api = get_client(token_store)
+            log.info("MCP: background sync started")
+            run_sync(conn, api, force=False)
+            conn.close()
+            log.info("MCP: background sync complete")
+        except Exception:
+            log.exception("MCP: background sync failed — serving from existing DB")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _db() -> sqlite3.Connection:
     """Return a read-only connection to the Garmin database."""
     global _DB_PATH
+    _ensure_synced()
     if _DB_PATH is None:
         _DB_PATH = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
     uri = f"file:{_DB_PATH}?mode=ro"
@@ -406,6 +443,58 @@ def run_sql(query: str) -> str:
         conn.close()
 
 
+@mcp.tool()
+def body_composition(start: str, end: str) -> str:
+    """Body composition trend: weight, BMI, body fat %, muscle mass for a date range.
+
+    Args:
+        start: Start date ISO (YYYY-MM-DD).
+        end: End date ISO (YYYY-MM-DD).
+    """
+    conn = _db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT calendar_date, weight_kg, bmi, body_fat_pct,
+                   muscle_mass_kg, bone_mass_kg, body_water_pct,
+                   visceral_fat, metabolic_age
+            FROM body_composition
+            WHERE calendar_date BETWEEN ? AND ?
+            ORDER BY calendar_date
+            """,
+            (start, end),
+        ).fetchall()
+        return _rows_to_md(rows)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def personal_records() -> str:
+    """Return all-time personal records (fastest 5K, 10K, half marathon, marathon, etc.)."""
+    conn = _db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                type_key,
+                activity_type,
+                CASE
+                    WHEN type_id IN (1,2,3,4,5,6)
+                    THEN ROUND(value / 60.0, 2) || ' min'
+                    ELSE ROUND(value / 1000.0, 2) || ' km'
+                END AS result,
+                pr_date,
+                activity_id
+            FROM personal_records
+            ORDER BY activity_type, type_id
+            """,
+        ).fetchall()
+        return _rows_to_md(rows)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Resource: schema
 # ---------------------------------------------------------------------------
@@ -476,6 +565,20 @@ Primary key: (activity_id, message_index, rank)
 - rank=0 is highest-probability classification
 - category TEXT (e.g. 'PULL_UP'), name TEXT (e.g. 'LAT_PULLDOWN'), probability REAL
 
+## body_composition
+Primary key: calendar_date TEXT
+- weight_kg REAL, bmi REAL, body_fat_pct REAL
+- muscle_mass_kg REAL, bone_mass_kg REAL, body_water_pct REAL
+- visceral_fat REAL, metabolic_age INTEGER
+(populated only if you use a Garmin smart scale)
+
+## personal_records
+Primary key: pr_id INTEGER
+- activity_type TEXT (e.g. 'running'), type_id INTEGER, type_key TEXT
+- type_id: 1=1km, 2=1mi, 3=5km, 4=10km, 5=half marathon, 6=marathon, 7=longest run
+- value REAL — duration in seconds (types 1-6) or distance in metres (type 7)
+- pr_date TEXT 'YYYY-MM-DD', activity_id INTEGER (source activity)
+
 ## raw_payloads
 Primary key: (endpoint, date_key)
 - fetched_at TEXT, payload TEXT (JSON)
@@ -514,6 +617,41 @@ GROUP BY a.activity_id ORDER BY a.calendar_date DESC LIMIT 10;
 # ---------------------------------------------------------------------------
 
 
-def serve() -> None:
-    """Start the MCP server over stdio."""
-    mcp.run(transport="stdio")
+def _add_health_routes(app: Any) -> Any:
+    """Add /healthz and /readyz routes to an existing Starlette app."""
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def healthz(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    async def readyz(request: Request) -> JSONResponse:
+        try:
+            conn = _db()
+            conn.execute("SELECT 1").fetchone()
+            conn.close()
+            return JSONResponse({"status": "ready"})
+        except Exception as exc:
+            return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
+
+    app.router.routes.insert(0, Route("/healthz", healthz))
+    app.router.routes.insert(1, Route("/readyz", readyz))
+    return app
+
+
+def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Start the MCP server.
+
+    transport: 'stdio' (default), 'sse', or 'streamable-http'.
+    """
+    if transport == "sse":
+        import uvicorn
+        app = _add_health_routes(mcp.sse_app())
+        uvicorn.run(app, host=host, port=port)
+    elif transport == "streamable-http":
+        import uvicorn
+        app = _add_health_routes(mcp.streamable_http_app())
+        uvicorn.run(app, host=host, port=port)
+    else:
+        mcp.run(transport="stdio")

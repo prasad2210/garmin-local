@@ -197,6 +197,44 @@ def normalize_training_readiness(raw_list: list[dict[str, Any]]) -> list[dict[st
     return rows
 
 
+def normalize_body_composition(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract body_composition rows from a get_body_composition range response.
+
+    The API returns a list under 'dateWeightList'; each entry may have
+    totalAverage nested fields per date.
+    """
+    rows = []
+    for entry in raw.get("dateWeightList") or []:
+        cdate = entry.get("calendarDate") or entry.get("date")
+        if not cdate:
+            continue
+        rows.append({
+            "calendar_date": cdate[:10],
+            "weight_kg": entry.get("weight"),
+            "bmi": entry.get("bmi"),
+            "body_fat_pct": entry.get("bodyFat"),
+            "muscle_mass_kg": entry.get("muscleMass"),
+            "bone_mass_kg": entry.get("boneMass"),
+            "body_water_pct": entry.get("bodyWater"),
+            "visceral_fat": entry.get("visceralFat"),
+            "metabolic_age": entry.get("metabolicAge"),
+        })
+    return rows
+
+
+def normalize_personal_record(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a single personal record entry to a personal_records row."""
+    return {
+        "pr_id": entry.get("id"),
+        "activity_type": entry.get("activityType"),
+        "type_id": entry.get("typeId"),
+        "type_key": entry.get("typeKey"),
+        "activity_id": entry.get("activityId"),
+        "value": entry.get("value"),
+        "pr_date": (entry.get("when") or "")[:10] or None,
+    }
+
+
 def normalize_training_status(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Map a raw training status payload to the ``training_status`` table row dict.
 

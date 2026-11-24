@@ -22,6 +22,7 @@ Work **phase by phase** (see "Phases"). Finish a phase, summarize what you built
 - UTCP: not now. Possibly later as a thin adapter over the same core.
 
 ## Hard rules
+  
 
 1. **Never** ask me for, read, print, log, or commit credentials or tokens. I run the interactive login (password + MFA) myself in my own terminal. Tokens live in `~/.garminconnect/garmin_tokens.json`; do not open that file.
 2. The only network target is Garmin, through the library. No telemetry, no other APIs.

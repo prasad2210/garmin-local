@@ -54,13 +54,13 @@ def test_migration_creates_tables(db):
 
 def test_migration_sets_user_version(db):
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 1
+    assert version == 2
 
 
 def test_migration_idempotent(db):
     migrate(db)  # second call must not raise or change version
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 1
+    assert version == 2
 
 
 # ---------------------------------------------------------------------------

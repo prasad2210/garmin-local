@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -190,6 +190,20 @@ CREATE TABLE IF NOT EXISTS body_composition (
 """
 
 
+_SCHEMA_V2 = """
+-- Personal records (all-time bests per distance/type)
+CREATE TABLE IF NOT EXISTS personal_records (
+    pr_id           INTEGER PRIMARY KEY,  -- Garmin's record id
+    activity_type   TEXT,                 -- e.g. 'running'
+    type_id         INTEGER,              -- 1=1km,2=1mi,3=5km,4=10km,5=HM,6=FM,7=longest
+    type_key        TEXT,                 -- human label e.g. '5K'
+    activity_id     INTEGER,              -- source activity
+    value           REAL,                 -- duration in seconds or distance in metres
+    pr_date         TEXT                  -- 'YYYY-MM-DD'
+);
+"""
+
+
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
@@ -218,5 +232,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         return
     if version < 1:
         conn.executescript(_SCHEMA_V1)
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    if version < 2:
+        conn.executescript(_SCHEMA_V2)
         conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
         conn.commit()
