@@ -444,16 +444,20 @@ def run_sql(query: str) -> str:
 
 
 @mcp.tool()
-def training_context(goal: str) -> str:
+def training_context(goal: str, weeks: int = 1) -> str:
     """Return a rich training context snapshot to help plan toward a running goal.
 
     Assembles recent training load, fitness trend, recovery state, sleep, HRV,
-    and relevant personal records into a single response. Claude can use this
-    to generate a personalised training plan or weekly schedule.
+    and relevant personal records into a single response. Claude uses this to
+    generate a personalised training plan — either a weekly schedule or a
+    multi-week training block.
 
     Args:
         goal: The runner's target, e.g. 'sub-2h half marathon', 'sub-20 5K',
-              'increase weekly mileage to 60km', 'plan this week's runs'.
+              'increase weekly mileage to 60km', 'plan this week's runs',
+              'increase top speed', 'sub-45 10K'.
+        weeks: How many weeks to plan (1 = this week only, 4-12 = training block).
+               Default 1.
     """
     conn = _db()
     try:
@@ -609,22 +613,38 @@ def training_context(goal: str) -> str:
         # ------------------------------------------------------------------
         # Guidance note for Claude
         # ------------------------------------------------------------------
+        plan_scope = (
+            "this week only (7 days, day-by-day)"
+            if weeks == 1
+            else f"a {weeks}-week training block plus a detailed breakdown of week 1"
+        )
+
         sections.append("---")
         sections.append(
-            "## Instructions for Claude\n"
-            f"The runner's goal is: **{goal}**\n\n"
-            "Using the data above, provide:\n"
-            "1. **Current fitness assessment** — where they are now relative to the goal "
-            "(use pace, HR, HRV trend, ACWR)\n"
-            "2. **This week's plan** — specific sessions with distance, pace zone, and purpose. "
-            "Be conservative if ACWR > 1.3 or HRV is trending down.\n"
-            "3. **Key limiters** — what's the main thing holding them back?\n"
-            "4. **4-week outlook** — weekly km targets and what to build toward\n\n"
-            "Pace zones based on their recent data:\n"
+            f"## Instructions for Claude\n"
+            f"The runner's goal is: **{goal}**\n"
+            f"Plan scope requested: **{plan_scope}**\n\n"
+            "Using the data above, provide:\n\n"
+            "### 1. Current fitness assessment\n"
+            "- Where they are now vs the goal (use pace, HR, ACWR, HRV trend)\n"
+            "- Estimated current ability (e.g. current 5K pace → what half marathon time that projects to)\n"
+            "- Key limiters: what's the main thing holding them back?\n\n"
+            "### 2. Training plan\n"
+            f"Output a **{plan_scope}**.\n"
+            "For each week include: total km target, number of sessions, session types.\n"
+            "For each session include: day, type (easy/tempo/interval/long), distance, pace zone, purpose.\n"
+            "Be conservative if ACWR > 1.3 or HRV is trending down — reduce load, don't add it.\n\n"
+            "### 3. Pace zones (derive from their data)\n"
             "- Easy: slowest recent avg pace + 30-45 sec/km\n"
-            "- Tempo: roughly 10K race pace\n"
-            "- Interval: 5K race pace or faster\n\n"
-            "Be specific with numbers. A farmer can follow this — no jargon without explanation."
+            "- Tempo: ~10K race pace (use PR if available)\n"
+            "- Interval: ~5K race pace or faster (use PR if available)\n"
+            "- Long run: easy pace, conversational effort\n\n"
+            "### Goal-specific guidance\n"
+            "- Race time target (sub-X): project current fitness → gap to goal → pacing strategy\n"
+            "- Top speed / VO2max: include weekly strides and one interval session\n"
+            "- Mileage build: apply 10% rule, never increase two hard weeks in a row\n"
+            "- Weekly plan: match session count to recent habits, don't prescribe more days than they currently run\n\n"
+            "Be specific with numbers. Write it so a non-technical runner can follow it without explanation."
         )
 
         return "\n".join(sections)
