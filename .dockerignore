@@ -1,0 +1,11 @@
+.venv/
+data/
+.env
+*.db
+docs/
+tests/
+.git/
+.gitignore
+docs/
+CLAUDE.md
+fly.toml

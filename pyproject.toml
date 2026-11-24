@@ -9,6 +9,8 @@ dependencies = [
     "curl_cffi==0.17.0",
     "mcp==2.3.0",
     "typer==0.9.0",
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.scripts]

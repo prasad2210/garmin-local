@@ -171,11 +171,13 @@ uv run garmin-local sync --now
 uv run garmin-local serve
 ```
 
-**For tools that connect over HTTP (like Joule):**
+**For tools that connect over HTTP (like Joule or Claude.ai):**
 ```bash
+export GARMIN_MCP_TOKEN=$(openssl rand -hex 32)
+echo $GARMIN_MCP_TOKEN   # save this — you need it to connect
 GARMIN_DB_PATH=data/garmin.db uv run garmin-local serve streamable-http --port 8080
 ```
-Then connect your tool to: `http://127.0.0.1:8080/mcp`
+Then connect your tool to `http://127.0.0.1:8080/mcp` with authentication mode **Bearer Token** and paste your token.
 
 ---
 
@@ -391,182 +393,145 @@ Re-run the Python installer and make sure **"Add Python to PATH"** is ticked.
 - The MCP server only allows read-only access — Claude can query but never modify your data
 - Credentials are stored in `~/.garminconnect/` (Mac/Linux) or `C:\Users\YourName\.garminconnect\` (Windows) and never logged or committed
 
+---
 
+## Use on Claude.ai mobile (optional cloud deploy)
 
-- A Garmin watch (tested on Forerunner 965; most modern Garmin devices work)
-- A Garmin Connect account (free)
-- A Mac or Linux computer
-- About 15 minutes
+The local setup above only works on the same computer. To use Claude.ai on your phone or any browser, you need to host the MCP server somewhere it's always reachable.
+
+**[Fly.io](https://fly.io)** is the best free option: persistent storage (no data loss on restart), never sleeps, free HTTPS, and 3 shared-CPU VMs free.
+
+> **Note:** ChatGPT does not support user-configurable MCP URLs. This section is for Claude.ai mobile only.
 
 ---
 
-## Step 1 — Install Python
+### Step 1 — Install Fly CLI
 
-You need Python 3.12 or newer.
-
-**Check if you already have it:**
+**Mac/Linux:**
+```bash
+curl -L https://fly.io/install.sh | sh
 ```
-python3 --version
-```
-If it shows `Python 3.12` or higher, skip to Step 2.
 
-**If not**, download and install it from [python.org/downloads](https://www.python.org/downloads/). Click the big yellow button and follow the installer.
+**Windows:**
+```
+powershell -Command "iwr https://fly.io/install.ps1 -useb | iex"
+```
+
+Then sign up and log in:
+```bash
+fly auth signup   # or: fly auth login
+```
 
 ---
 
-## Step 2 — Install uv (the tool that runs everything)
-
-Open your Terminal (press `Cmd + Space`, type "Terminal", press Enter) and paste this:
+### Step 2 — Create a Fly app and persistent volume
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+fly apps create garmin-local-mcp
+fly volumes create garmin_data --region fra --size 1
 ```
 
-Then close and reopen your Terminal window so it takes effect.
+Replace `fra` with the region closest to you (`lhr` for London, `iad` for US East, `nrt` for Tokyo, etc).
 
 ---
 
-## Step 3 — Download garmin-local
+### Step 3 — Set your secrets
+
+The server requires a bearer token to authenticate requests. Generate a random one and store it as a Fly secret — it will never appear in your config files.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/garmin-local.git
-cd garmin-local
-uv sync
+fly secrets set GARMIN_MCP_TOKEN=$(openssl rand -hex 32) --app garmin-local-mcp
 ```
 
-> If you don't have `git`, download the ZIP from GitHub and unzip it, then `cd` into the folder.
+**Save the token value** — you'll need it when connecting Claude.ai.
+
+To see it again later:
+```bash
+fly secrets list --app garmin-local-mcp
+```
+(This shows the name but not the value. If you lose it, generate a new one with the command above.)
 
 ---
 
-## Step 4 — Log in to Garmin Connect
+### Step 4 — Deploy
+
+From the garmin-local directory:
+```bash
+fly deploy --app garmin-local-mcp
+```
+
+This builds the Docker image and deploys it. Takes about 2 minutes.
+
+Check it's running:
+```bash
+curl https://garmin-local-mcp.fly.dev/healthz
+# → {"status":"ok"}
+```
+
+---
+
+### Step 5 — Log in to Garmin inside the container (one time only)
+
+The container needs your Garmin token to sync. SSH in and run the login interactively:
 
 ```bash
+fly ssh console --app garmin-local-mcp
+# Inside the container:
 uv run garmin-local login
+# Type your Garmin email, password, and MFA code when prompted
+exit
 ```
 
-It will ask for your Garmin Connect email and password. Type them in (the password won't show as you type — that's normal). If you have two-factor authentication, it will prompt for that too.
+The token is saved to `/app/data/.garminconnect/` on the persistent volume — it survives redeploys.
 
-Your login is saved to your computer (`~/.garminconnect/`). You only need to do this once. garmin-local never sees your password again after this step.
-
----
-
-## Step 5 — Pull your data
-
+After logging in, trigger the first sync:
 ```bash
+fly ssh console --app garmin-local-mcp
 uv run garmin-local sync
+exit
 ```
 
-This downloads the last 90 days of your training, sleep, HRV, and wellness data into a local database on your computer. It takes 2–5 minutes — Garmin asks us to go slowly so we don't hammer their servers.
+After that, the container syncs automatically every 24 hours.
 
-You'll see progress messages. When it says `Sync complete`, you're done.
+---
 
-**To pull fresh data later** (after a run, or the next morning):
+### Step 6 — Connect Claude.ai mobile
+
+Claude.ai detects the server as requiring sign-in. Work around this:
+
+1. Open Claude.ai on your phone (or browser)
+2. Tap your profile picture → **Settings**
+3. Tap **MCP Connectors** → **Add connector**
+4. Enter the URL: `https://garmin-local-mcp.fly.dev/mcp`
+5. When asked about authentication, select **"No sign-in"**
+6. Expand **Advanced Settings** → click **Add header**:
+   - Name: `Authorization`
+   - Value: `Bearer <your-token>`  _(the token from Step 3)_
+7. Click **Add**
+
+The garmin-local tools should now appear in your Claude conversations.
+
+---
+
+### Fly.io tips
+
+**Check logs:**
 ```bash
+fly logs --app garmin-local-mcp
+```
+
+**Force a sync now:**
+```bash
+fly ssh console --app garmin-local-mcp
 uv run garmin-local sync --now
+exit
 ```
 
----
-
-## Step 6 — Start the MCP server
-
-The MCP server is what lets Claude talk to your data.
-
-**For Claude Desktop (recommended):**
+**Update to a new version:**
 ```bash
-uv run garmin-local serve
+fly deploy --app garmin-local-mcp
 ```
 
-**For tools that connect over HTTP (like Joule):**
-```bash
-GARMIN_DB_PATH=data/garmin.db uv run garmin-local serve streamable-http --port 8080
-```
-Then connect your tool to: `http://127.0.0.1:8080/mcp`
-
-The server also exposes:
-- `http://127.0.0.1:8080/healthz` — is the server running?
-- `http://127.0.0.1:8080/readyz` — can it reach the database?
+**Keep it free:** Fly's free tier covers 3 shared-CPU-1x VMs and 3GB storage. This app uses 1 VM and 1GB. Stay within those limits and there's no charge.
 
 ---
-
-## Step 7 — Connect to Claude Desktop
-
-1. Open Claude Desktop
-2. Go to **Settings → Developer → Edit Config**
-3. Add this to the config file:
-
-```json
-{
-  "mcpServers": {
-    "garmin-local": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/garmin-local", "garmin-local", "serve"],
-      "env": {
-        "GARMIN_DB_PATH": "/path/to/garmin-local/data/garmin.db"
-      }
-    }
-  }
-}
-```
-
-Replace `/path/to/garmin-local` with the actual folder path (e.g. `/Users/john/garmin-local`).
-
-4. Restart Claude Desktop
-5. You should see a small hammer icon — that means the tools are connected
-
----
-
-## Asking Claude about your data
-
-Once connected, just ask in plain English:
-
-| Question | What it uses |
-|---|---|
-| "How did I sleep last week?" | Sleep stages, score, HRV |
-| "Am I overtraining?" | Training load, ACWR ratio |
-| "Show my runs this month" | Activities list |
-| "What's my 5K PR?" | Personal records |
-| "How's my body battery been?" | Daily wellness |
-| "Compare my HRV to my training load" | HRV + training status |
-
----
-
-## Keeping your data fresh
-
-Your data only updates when you run `sync`. A few options:
-
-**Manual** — run `uv run garmin-local sync --now` after a workout or in the morning.
-
-**Automatic on Mac** — add this to your crontab (`crontab -e`) to sync every morning at 7am:
-```
-0 7 * * * cd /path/to/garmin-local && uv run garmin-local sync >> data/sync.log 2>&1
-```
-
-The MCP server also kicks off a background sync automatically on the first request of each session, so it will catch up even if you forgot to run it manually.
-
----
-
-## Troubleshooting
-
-**"Token expired" or login error**
-Run `uv run garmin-local login` again to refresh your session.
-
-**"No data" for recent dates**
-Run `uv run garmin-local sync --now` to pull the latest data.
-
-**Server won't start / port already in use**
-Another process is using that port. Try a different one:
-```bash
-GARMIN_DB_PATH=data/garmin.db uv run garmin-local serve streamable-http --port 9090
-```
-
-**Data seems old**
-The sync cadence checks whether the last sync was within 7 days. Use `--now` to force it regardless.
-
----
-
-## Your data stays on your computer
-
-- The database lives in `data/garmin.db` on your machine
-- No data is sent anywhere except to Garmin's servers (to fetch it)
-- The MCP server only allows read-only access — Claude can query but never modify your data
-- Credentials are stored in `~/.garminconnect/` and never logged or committed

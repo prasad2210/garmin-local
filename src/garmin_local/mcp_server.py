@@ -29,46 +29,64 @@ mcp = MCPServer(
 )
 
 _DB_PATH: Path | None = None
-_sync_done = False
+_sync_started = False
 _sync_lock = threading.Lock()
+_sync_running = threading.Lock()  # only one sync at a time
 
 log = logging.getLogger(__name__)
 
 
-def _ensure_synced() -> None:
-    """Kick off a watermark sync once per server lifetime in a background thread."""
-    global _sync_done
+def _run_sync_once(force: bool = False) -> str:
+    """Run a single watermark sync, serialised via _sync_running. Returns a status string."""
+    if not _sync_running.acquire(blocking=False):
+        return "skipped — sync already in progress"
+    try:
+        from garmin_local.auth import get_client, get_token_store
+        from garmin_local.db import migrate, open_db
+        from garmin_local.sync import run_sync
+
+        db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = open_db(db_path)
+        conn.execute("PRAGMA busy_timeout = 30000")  # wait up to 30s for write lock
+        migrate(conn)
+        token_store = get_token_store()
+        api = get_client(token_store)
+        log.info("MCP: sync started (force=%s)", force)
+        run_sync(conn, api, force=force)
+        conn.close()
+        log.info("MCP: sync complete")
+        return "ok"
+    except Exception as exc:
+        log.exception("MCP: sync failed — serving from existing DB")
+        return f"error: {exc}"
+    finally:
+        _sync_running.release()
+
+
+def _start_sync_scheduler() -> None:
+    """Start a daemon thread that syncs immediately then every GARMIN_SYNC_INTERVAL_HOURS hours."""
+    global _sync_started
     with _sync_lock:
-        if _sync_done:
+        if _sync_started:
             return
-        _sync_done = True
+        _sync_started = True
 
-    def _run() -> None:
-        try:
-            from garmin_local.auth import get_client, get_token_store
-            from garmin_local.db import migrate, open_db
-            from garmin_local.sync import run_sync
+    interval_h = int(os.environ.get("GARMIN_SYNC_INTERVAL_HOURS", "24"))
+    interval_s = interval_h * 3600
 
-            db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = open_db(db_path)
-            migrate(conn)
-            token_store = get_token_store()
-            api = get_client(token_store)
-            log.info("MCP: background sync started")
-            run_sync(conn, api, force=False)
-            conn.close()
-            log.info("MCP: background sync complete")
-        except Exception:
-            log.exception("MCP: background sync failed — serving from existing DB")
+    def _loop() -> None:
+        while True:
+            _run_sync_once(force=False)
+            log.info("MCP: next sync in %dh", interval_h)
+            threading.Event().wait(interval_s)
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_loop, daemon=True, name="garmin-sync").start()
 
 
 def _db() -> sqlite3.Connection:
     """Return a read-only connection to the Garmin database."""
     global _DB_PATH
-    _ensure_synced()
     if _DB_PATH is None:
         _DB_PATH = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
     uri = f"file:{_DB_PATH}?mode=ro"
@@ -652,7 +670,8 @@ def training_context(goal: str, weeks: int = 1) -> str:
         conn.close()
 
 
-
+@mcp.tool()
+def body_composition(start: str, end: str) -> str:
     """Body composition trend: weight, BMI, body fat %, muscle mass for a date range.
 
     Args:
@@ -675,6 +694,28 @@ def training_context(goal: str, weeks: int = 1) -> str:
         return _rows_to_md(rows)
     finally:
         conn.close()
+
+
+@mcp.tool()
+def sync_now() -> str:
+    """Trigger an immediate sync from Garmin Connect.
+
+    Starts a sync in the background and returns immediately — the sync itself
+    takes 1-3 minutes. Call sync_status() afterwards to confirm it completed.
+    Safe to call at any time; uses upserts so re-running changes nothing if
+    data is already current.
+    """
+    if not _sync_running.acquire(blocking=False):
+        return "A sync is already running. Call sync_status() in a minute to check progress."
+    _sync_running.release()
+
+    threading.Thread(
+        target=_run_sync_once,
+        kwargs={"force": True},
+        daemon=True,
+        name="garmin-sync-manual",
+    ).start()
+    return "Sync started in the background. Call sync_status() in 1-2 minutes to confirm it completed."
 
 
 @mcp.tool()
@@ -794,6 +835,7 @@ Primary key: (endpoint, date_key)
 ## Tools summary
 - sync_status, list_activities, activity_detail, daily_overview, weekly_summary
 - training_load, sleep_analysis, body_composition, personal_records
+- sync_now — pull the latest data from Garmin Connect immediately
 - training_context(goal) — assembles all relevant data for a planning goal;
   Claude uses this to generate a personalised training plan or weekly schedule
 - run_sql — arbitrary SELECT
@@ -832,7 +874,7 @@ GROUP BY a.activity_id ORDER BY a.calendar_date DESC LIMIT 10;
 
 
 def _add_health_routes(app: Any) -> Any:
-    """Add /healthz and /readyz routes to an existing Starlette app."""
+    """Add /healthz, /readyz, and OAuth discovery routes to an existing Starlette app."""
     from starlette.requests import Request
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -849,8 +891,43 @@ def _add_health_routes(app: Any) -> Any:
         except Exception as exc:
             return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
 
+    async def oauth_protected_resource(request: Request) -> JSONResponse:
+        # Tells Claude.ai this server uses Bearer token auth (not OAuth)
+        return JSONResponse({
+            "resource": "https://garmin-local-mcp.fly.dev",
+            "bearer_methods_supported": ["header"],
+        })
+
+    async def oauth_authorization_server(request: Request) -> JSONResponse:
+        # Return empty — no OAuth server, just static Bearer token
+        return JSONResponse({}, status_code=200)
+
     app.router.routes.insert(0, Route("/healthz", healthz))
     app.router.routes.insert(1, Route("/readyz", readyz))
+    app.router.routes.insert(2, Route("/.well-known/oauth-protected-resource", oauth_protected_resource))
+    app.router.routes.insert(3, Route("/.well-known/oauth-authorization-server", oauth_authorization_server))
+    return app
+
+
+def _add_bearer_auth(app: Any, token: str) -> Any:
+    """Wrap app with bearer token auth. /healthz and /readyz are always public."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    _PUBLIC = {"/healthz", "/readyz", "/.well-known/oauth-authorization-server",
+               "/.well-known/oauth-protected-resource"}
+
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Any) -> Any:
+            if request.url.path in _PUBLIC:
+                return await call_next(request)
+            auth = request.headers.get("Authorization", "")
+            if auth != f"Bearer {token}":
+                return Response("Unauthorized", status_code=401)
+            return await call_next(request)
+
+    app.add_middleware(BearerAuthMiddleware)
     return app
 
 
@@ -858,14 +935,35 @@ def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000) -
     """Start the MCP server.
 
     transport: 'stdio' (default), 'sse', or 'streamable-http'.
+    For HTTP transports, GARMIN_MCP_TOKEN env var must be set.
     """
-    if transport == "sse":
+    if transport in ("sse", "streamable-http"):
         import uvicorn
-        app = _add_health_routes(mcp.sse_app())
-        uvicorn.run(app, host=host, port=port)
-    elif transport == "streamable-http":
-        import uvicorn
-        app = _add_health_routes(mcp.streamable_http_app())
-        uvicorn.run(app, host=host, port=port)
+
+        token = os.environ.get("GARMIN_MCP_TOKEN", "")
+        if not token:
+            raise SystemExit(
+                "GARMIN_MCP_TOKEN env var is required for HTTP transport. "
+                "Set it to a long random secret, e.g.:\n"
+                "  export GARMIN_MCP_TOKEN=$(openssl rand -hex 32)"
+            )
+
+        _start_sync_scheduler()
+
+        if transport == "sse":
+            app = _add_health_routes(mcp.sse_app())
+        else:
+            # Pass transport_security=None when binding to 0.0.0.0 so the MCP SDK
+            # doesn't restrict to localhost-only Host headers. Our Bearer auth
+            # middleware handles access control instead.
+            if host == "0.0.0.0":  # noqa: S104
+                from mcp.server.transport_security import TransportSecuritySettings
+                sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+                app = _add_health_routes(mcp.streamable_http_app(transport_security=sec))
+            else:
+                app = _add_health_routes(mcp.streamable_http_app())
+
+        app = _add_bearer_auth(app, token)
+        uvicorn.run(app, host=host, port=port, http="h11")
     else:
         mcp.run(transport="stdio")
