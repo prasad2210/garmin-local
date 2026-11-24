@@ -205,24 +205,8 @@ def run_sync(
                 strength_ids.append(act["activityId"])
         conn.commit()
         logger.info("Upserted %d activities", len(activities_raw))
-
-        for aid in strength_ids:
-            logger.info("Fetching exercise sets for activity %s", aid)
-            sets_raw = api.get_activity_exercise_sets(aid)
-            _sleep()
-            if sets_raw:
-                _save_raw(conn, "activity_exercise_sets", str(aid), sets_raw)
-                sets_rows, ex_rows = normalize_exercise_sets(aid, sets_raw)
-                for r in sets_rows:
-                    _upsert_composite(conn, "strength_sets", ["activity_id", "message_index"], r)
-                for r in ex_rows:
-                    _upsert_composite(
-                        conn,
-                        "exercise_set_exercises",
-                        ["activity_id", "message_index", "rank"],
-                        r,
-                    )
-                conn.commit()
+    else:
+        strength_ids = []
 
     # ------------------------------------------------------------------
     # Daily wellness
@@ -342,6 +326,27 @@ def run_sync(
             logger.info("Upserted personal records")
     except Exception:
         logger.exception("personal_records fetch failed — skipping")
+
+    # ------------------------------------------------------------------
+    # Exercise sets (deferred — slow, one call per activity)
+    # ------------------------------------------------------------------
+    for aid in strength_ids:
+        logger.info("Fetching exercise sets for activity %s", aid)
+        sets_raw = api.get_activity_exercise_sets(aid)
+        _sleep()
+        if sets_raw:
+            _save_raw(conn, "activity_exercise_sets", str(aid), sets_raw)
+            sets_rows, ex_rows = normalize_exercise_sets(aid, sets_raw)
+            for r in sets_rows:
+                _upsert_composite(conn, "strength_sets", ["activity_id", "message_index"], r)
+            for r in ex_rows:
+                _upsert_composite(
+                    conn,
+                    "exercise_set_exercises",
+                    ["activity_id", "message_index", "rank"],
+                    r,
+                )
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Watermark

@@ -29,46 +29,46 @@ mcp = MCPServer(
 )
 
 _DB_PATH: Path | None = None
-_sync_done = False
-_sync_lock = threading.Lock()
+_sync_running = threading.Lock()  # only one sync at a time
 
 log = logging.getLogger(__name__)
 
 
-def _ensure_synced() -> None:
-    """Kick off a watermark sync once per server lifetime in a background thread."""
-    global _sync_done
-    with _sync_lock:
-        if _sync_done:
-            return
-        _sync_done = True
+def _run_sync_once(force: bool = False) -> str:
+    """Run a single watermark sync, serialised via _sync_running. Returns a status string."""
+    if not _sync_running.acquire(blocking=False):
+        return "skipped — sync already in progress"
+    try:
+        from garmin_local.auth import get_client, get_token_store
+        from garmin_local.db import migrate, open_db
+        from garmin_local.sync import run_sync
 
-    def _run() -> None:
-        try:
-            from garmin_local.auth import get_client, get_token_store
-            from garmin_local.db import migrate, open_db
-            from garmin_local.sync import run_sync
+        db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = open_db(db_path)
+        conn.execute("PRAGMA busy_timeout = 30000")  # wait up to 30s for write lock
+        migrate(conn)
+        token_store = get_token_store()
+        api = get_client(token_store)
+        log.info("MCP: sync started (force=%s)", force)
+        run_sync(conn, api, force=force)
+        conn.close()
+        log.info("MCP: sync complete")
+        return "ok"
+    except Exception as exc:
+        log.exception("MCP: sync failed — serving from existing DB")
+        return f"error: {exc}"
+    finally:
+        _sync_running.release()
 
-            db_path = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = open_db(db_path)
-            migrate(conn)
-            token_store = get_token_store()
-            api = get_client(token_store)
-            log.info("MCP: background sync started")
-            run_sync(conn, api, force=False)
-            conn.close()
-            log.info("MCP: background sync complete")
-        except Exception:
-            log.exception("MCP: background sync failed — serving from existing DB")
 
-    threading.Thread(target=_run, daemon=True).start()
+def _start_sync_scheduler() -> None:
+    pass  # no-op for local — sync runs on demand via sync_now or garmin-local sync
 
 
 def _db() -> sqlite3.Connection:
     """Return a read-only connection to the Garmin database."""
     global _DB_PATH
-    _ensure_synced()
     if _DB_PATH is None:
         _DB_PATH = Path(os.environ.get("GARMIN_DB_PATH", "data/garmin.db"))
     uri = f"file:{_DB_PATH}?mode=ro"
@@ -652,7 +652,8 @@ def training_context(goal: str, weeks: int = 1) -> str:
         conn.close()
 
 
-
+@mcp.tool()
+def body_composition(start: str, end: str) -> str:
     """Body composition trend: weight, BMI, body fat %, muscle mass for a date range.
 
     Args:
@@ -675,6 +676,28 @@ def training_context(goal: str, weeks: int = 1) -> str:
         return _rows_to_md(rows)
     finally:
         conn.close()
+
+
+@mcp.tool()
+def sync_now() -> str:
+    """Trigger an immediate sync from Garmin Connect.
+
+    Starts a sync in the background and returns immediately — the sync itself
+    takes 1-3 minutes. Call sync_status() afterwards to confirm it completed.
+    Safe to call at any time; uses upserts so re-running changes nothing if
+    data is already current.
+    """
+    if not _sync_running.acquire(blocking=False):
+        return "A sync is already running. Call sync_status() in a minute to check progress."
+    _sync_running.release()
+
+    threading.Thread(
+        target=_run_sync_once,
+        kwargs={"force": True},
+        daemon=True,
+        name="garmin-sync-manual",
+    ).start()
+    return "Sync started in the background. Call sync_status() in 1-2 minutes to confirm it completed."
 
 
 @mcp.tool()
@@ -794,6 +817,7 @@ Primary key: (endpoint, date_key)
 ## Tools summary
 - sync_status, list_activities, activity_detail, daily_overview, weekly_summary
 - training_load, sleep_analysis, body_composition, personal_records
+- sync_now — pull the latest data from Garmin Connect immediately
 - training_context(goal) — assembles all relevant data for a planning goal;
   Claude uses this to generate a personalised training plan or weekly schedule
 - run_sql — arbitrary SELECT
@@ -859,13 +883,14 @@ def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8000) -
 
     transport: 'stdio' (default), 'sse', or 'streamable-http'.
     """
-    if transport == "sse":
+    if transport in ("sse", "streamable-http"):
         import uvicorn
-        app = _add_health_routes(mcp.sse_app())
-        uvicorn.run(app, host=host, port=port)
-    elif transport == "streamable-http":
-        import uvicorn
-        app = _add_health_routes(mcp.streamable_http_app())
+
+        if transport == "sse":
+            app = _add_health_routes(mcp.sse_app())
+        else:
+            app = _add_health_routes(mcp.streamable_http_app())
+
         uvicorn.run(app, host=host, port=port)
     else:
         mcp.run(transport="stdio")
