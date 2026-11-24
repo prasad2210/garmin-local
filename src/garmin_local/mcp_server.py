@@ -444,7 +444,195 @@ def run_sql(query: str) -> str:
 
 
 @mcp.tool()
-def body_composition(start: str, end: str) -> str:
+def training_context(goal: str) -> str:
+    """Return a rich training context snapshot to help plan toward a running goal.
+
+    Assembles recent training load, fitness trend, recovery state, sleep, HRV,
+    and relevant personal records into a single response. Claude can use this
+    to generate a personalised training plan or weekly schedule.
+
+    Args:
+        goal: The runner's target, e.g. 'sub-2h half marathon', 'sub-20 5K',
+              'increase weekly mileage to 60km', 'plan this week's runs'.
+    """
+    conn = _db()
+    try:
+        today = date.today()
+        eight_weeks_ago = str(today - timedelta(weeks=8))
+        four_weeks_ago = str(today - timedelta(weeks=4))
+        two_weeks_ago = str(today - timedelta(weeks=2))
+        today_str = str(today)
+
+        sections: list[str] = [f"# Training context for goal: {goal}\n"]
+        sections.append(f"_Data as of {today_str}_\n")
+
+        # ------------------------------------------------------------------
+        # Current load and fitness trend
+        # ------------------------------------------------------------------
+        load_rows = conn.execute(
+            """
+            SELECT
+                strftime('%Y-W%W', calendar_date) AS week,
+                ROUND(AVG(acute_load), 0)    AS acute_load,
+                ROUND(AVG(acwr_ratio), 2)    AS acwr,
+                ROUND(AVG(acwr_percent), 0)  AS acwr_pct,
+                MAX(status_phrase)           AS status,
+                ROUND(AVG(fitness_trend), 1) AS fitness_trend
+            FROM training_status
+            WHERE calendar_date >= ?
+            GROUP BY week ORDER BY week
+            """,
+            (eight_weeks_ago,),
+        ).fetchall()
+
+        sections.append("## Training load (8 weeks)")
+        sections.append(_rows_to_md(load_rows))
+        sections.append(
+            "_ACWR guide: <0.8 = undertraining, 0.8–1.3 = optimal, >1.5 = injury risk_\n"
+        )
+
+        # Most recent status
+        latest_status = conn.execute(
+            """
+            SELECT calendar_date, acute_load, acwr_ratio, acwr_percent, status_phrase, fitness_trend
+            FROM training_status
+            ORDER BY calendar_date DESC LIMIT 1
+            """
+        ).fetchone()
+        if latest_status:
+            sections.append("**Most recent training status:**")
+            for k in latest_status.keys():
+                sections.append(f"- {k}: {_fmt(latest_status[k])}")
+            sections.append("")
+
+        # ------------------------------------------------------------------
+        # Weekly running volume (last 8 weeks)
+        # ------------------------------------------------------------------
+        volume_rows = conn.execute(
+            """
+            SELECT
+                strftime('%Y-W%W', calendar_date) AS week,
+                COUNT(*) AS runs,
+                ROUND(SUM(distance_m)/1000.0, 1) AS total_km,
+                ROUND(AVG(distance_m)/1000.0, 1) AS avg_km,
+                ROUND(AVG(avg_hr_bpm), 0)         AS avg_hr,
+                ROUND(MIN(avg_speed_mps) * 3.6, 1) AS slowest_kph,
+                ROUND(MAX(avg_speed_mps) * 3.6, 1) AS fastest_kph
+            FROM activities
+            WHERE activity_type = 'running' AND calendar_date >= ?
+            GROUP BY week ORDER BY week
+            """,
+            (eight_weeks_ago,),
+        ).fetchall()
+
+        sections.append("## Running volume (8 weeks)")
+        sections.append(_rows_to_md(volume_rows))
+        sections.append("")
+
+        # ------------------------------------------------------------------
+        # Recent runs (last 4 weeks) with pace
+        # ------------------------------------------------------------------
+        recent_runs = conn.execute(
+            """
+            SELECT
+                calendar_date,
+                activity_name,
+                ROUND(distance_m/1000.0, 2)                            AS km,
+                ROUND(duration_s/60.0, 1)                              AS duration_min,
+                ROUND(1000.0 / NULLIF(distance_m/NULLIF(duration_s,0), 0) / 60.0, 2) AS pace_min_per_km,
+                avg_hr_bpm,
+                aerobic_te
+            FROM activities
+            WHERE activity_type = 'running' AND calendar_date >= ?
+            ORDER BY calendar_date DESC
+            """,
+            (four_weeks_ago,),
+        ).fetchall()
+
+        sections.append("## Recent runs (last 4 weeks)")
+        sections.append(_rows_to_md(recent_runs))
+        sections.append("")
+
+        # ------------------------------------------------------------------
+        # Recovery: HRV and sleep last 14 days
+        # ------------------------------------------------------------------
+        recovery_rows = conn.execute(
+            """
+            SELECT
+                ds.calendar_date,
+                h.last_night_avg_ms  AS hrv_ms,
+                h.status             AS hrv_status,
+                sl.sleep_score,
+                ROUND(sl.total_sleep_s/3600.0,1) AS sleep_h,
+                ds.body_battery_at_wake AS bb_wake,
+                tr.score             AS readiness
+            FROM daily_summary ds
+            LEFT JOIN hrv h ON h.calendar_date = ds.calendar_date
+            LEFT JOIN sleep sl ON sl.calendar_date = ds.calendar_date
+            LEFT JOIN (
+                SELECT calendar_date, score FROM training_readiness
+                WHERE input_context = 'AFTER_WAKEUP_RESET' OR input_context IS NULL
+                GROUP BY calendar_date HAVING timestamp_gmt = MIN(timestamp_gmt)
+            ) tr ON tr.calendar_date = ds.calendar_date
+            WHERE ds.calendar_date >= ?
+            ORDER BY ds.calendar_date
+            """,
+            (two_weeks_ago,),
+        ).fetchall()
+
+        sections.append("## Recovery: HRV, sleep, readiness (last 14 days)")
+        sections.append(_rows_to_md(recovery_rows))
+        sections.append("")
+
+        # ------------------------------------------------------------------
+        # Personal records (running)
+        # ------------------------------------------------------------------
+        pr_rows = conn.execute(
+            """
+            SELECT type_key, type_id,
+                CASE
+                    WHEN type_id IN (1,2,3,4,5,6)
+                    THEN ROUND(value/60.0, 2) || ' min'
+                    ELSE ROUND(value/1000.0, 2) || ' km'
+                END AS result,
+                pr_date
+            FROM personal_records
+            WHERE activity_type = 'running'
+            ORDER BY type_id
+            """
+        ).fetchall()
+
+        sections.append("## Personal records (running)")
+        sections.append(_rows_to_md(pr_rows) if pr_rows else "_No personal records synced yet_")
+        sections.append("")
+
+        # ------------------------------------------------------------------
+        # Guidance note for Claude
+        # ------------------------------------------------------------------
+        sections.append("---")
+        sections.append(
+            "## Instructions for Claude\n"
+            f"The runner's goal is: **{goal}**\n\n"
+            "Using the data above, provide:\n"
+            "1. **Current fitness assessment** — where they are now relative to the goal "
+            "(use pace, HR, HRV trend, ACWR)\n"
+            "2. **This week's plan** — specific sessions with distance, pace zone, and purpose. "
+            "Be conservative if ACWR > 1.3 or HRV is trending down.\n"
+            "3. **Key limiters** — what's the main thing holding them back?\n"
+            "4. **4-week outlook** — weekly km targets and what to build toward\n\n"
+            "Pace zones based on their recent data:\n"
+            "- Easy: slowest recent avg pace + 30-45 sec/km\n"
+            "- Tempo: roughly 10K race pace\n"
+            "- Interval: 5K race pace or faster\n\n"
+            "Be specific with numbers. A farmer can follow this — no jargon without explanation."
+        )
+
+        return "\n".join(sections)
+    finally:
+        conn.close()
+
+
+
     """Body composition trend: weight, BMI, body fat %, muscle mass for a date range.
 
     Args:
@@ -583,7 +771,13 @@ Primary key: pr_id INTEGER
 Primary key: (endpoint, date_key)
 - fetched_at TEXT, payload TEXT (JSON)
 
-## Example queries
+## Tools summary
+- sync_status, list_activities, activity_detail, daily_overview, weekly_summary
+- training_load, sleep_analysis, body_composition, personal_records
+- training_context(goal) — assembles all relevant data for a planning goal;
+  Claude uses this to generate a personalised training plan or weekly schedule
+- run_sql — arbitrary SELECT
+
 
 -- Last 4 weeks of runs with pace
 SELECT calendar_date, activity_name,
